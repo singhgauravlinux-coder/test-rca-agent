@@ -105,25 +105,28 @@ jobs:
           provenance: true
           sbom: true
 
+      # Scanner runs from its container image (no third-party action version to pin).
       - name: Trivy vulnerability scan
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          image-ref: ${{ env.REGISTRY }}/${{ github.repository_owner }}/rca-agent-${{ matrix.component }}:${{ github.event_name == 'pull_request' && 'latest' || format('sha-{0}', github.sha) }}
-          format: sarif
-          output: trivy-${{ matrix.component }}.sarif
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-          exit-code: "0"   # report only; flip to "1" to block on findings
+        if: github.event_name != 'pull_request'
         continue-on-error: true
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ github.repository_owner }}/rca-agent-${{ matrix.component }}:sha-${{ github.sha }}
+        run: |
+          docker run --rm -v "$PWD:/out" \
+            -e TRIVY_USERNAME="${{ github.actor }}" -e TRIVY_PASSWORD="${{ secrets.GITHUB_TOKEN }}" \
+            aquasec/trivy:latest image \
+            --severity CRITICAL,HIGH --ignore-unfixed --exit-code 0 \
+            --format sarif --output /out/trivy-${{ matrix.component }}.sarif "${IMAGE,,}"
 
       - name: Upload scan results
-        if: always() && hashFiles(format('trivy-{0}.sarif', matrix.component)) != ''
+        if: always() && github.event_name != 'pull_request' && hashFiles(format('trivy-{0}.sarif', matrix.component)) != ''
+        continue-on-error: true
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy-${{ matrix.component }}.sarif
           category: trivy-${{ matrix.component }}
 
-  # ---------------------------------------------------------------- deploy
+  # ------------------------------------------------- manifest tag update
   # Writes the freshly built image tag + registry owner into k8s/ and commits it back,
   # so Git always shows what is deployed (and ArgoCD / Flux can sync straight from it).
   update-manifests:
@@ -159,55 +162,3 @@ jobs:
           git commit -m "ci: deploy images sha-${GITHUB_SHA::7} [skip ci]"
           git pull --rebase origin main
           git push origin main
-
-  deploy:
-    name: Deploy to Kubernetes
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-    needs: update-manifests
-    runs-on: ubuntu-latest
-    environment: production        # add required reviewers in repo settings for a manual gate
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: main                # includes the manifest commit made above
-
-      - name: Check cluster credentials
-        id: gate
-        env:
-          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
-        run: |
-          if [ -z "$KUBE_CONFIG" ]; then
-            echo "::notice::KUBE_CONFIG secret not set - skipping deploy (images are already pushed)."
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Set kube context
-        if: steps.gate.outputs.enabled == 'true'
-        uses: azure/k8s-set-context@v4
-        with:
-          method: kubeconfig
-          kubeconfig: ${{ secrets.KUBE_CONFIG }}
-
-      - name: Apply manifests with this commit's images
-        if: steps.gate.outputs.enabled == 'true'
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: |
-          set -euo pipefail
-          cd k8s   # tags/owner were already committed by update-manifests
-          # namespace + secret first so pods never start without the key
-          kubectl apply -f namespace.yaml
-          kubectl -n rca-agent create secret generic rca-gemini \
-            --from-literal=GEMINI_API_KEY="${GEMINI_API_KEY}" \
-            --dry-run=client -o yaml | kubectl apply -f -
-          kubectl apply -k .
-
-      - name: Wait for rollout
-        if: steps.gate.outputs.enabled == 'true'
-        run: |
-          kubectl -n rca-agent rollout status deploy/rca-backend  --timeout=180s
-          kubectl -n rca-agent rollout status deploy/rca-frontend --timeout=180s
