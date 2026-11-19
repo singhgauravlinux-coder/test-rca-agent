@@ -10,7 +10,7 @@ resources:
 # CI rewrites these tags to the commit SHA on deploy.
 # Replace OWNER with your GitHub user/org (lowercase).
 images:
-  - name: ghcr.io/OWNER/rca-agent-backend
-    newTag: latest
-  - name: ghcr.io/OWNER/rca-agent-frontend
-    newTag: latest
+  - name: ghcr.io/singhgauravlinux-coder/rca-agent-backend
+    newTag: sha-c09319a611367f02ceb366c0f96db2cee42acaff
+  - name: ghcr.io/singhgauravlinux-coder/rca-agent-frontend
+    newTag: sha-c09319a611367f02ceb366c0f96db2cee42acaff

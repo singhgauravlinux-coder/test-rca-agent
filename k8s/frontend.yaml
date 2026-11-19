@@ -17,7 +17,7 @@ spec:
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: frontend
-          image: ghcr.io/OWNER/rca-agent-frontend:latest   # replaced by kustomize images:
+          image: ghcr.io/singhgauravlinux-coder/rca-agent-frontend:latest   # replaced by kustomize images:
           ports: [{name: http, containerPort: 8080}]
           env:
             - name: BACKEND_URL
