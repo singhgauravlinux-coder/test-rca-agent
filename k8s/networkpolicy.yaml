@@ -1,0 +1,14 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backend-only-from-frontend
+  namespace: rca-agent
+spec:
+  podSelector:
+    matchLabels: {app: rca-backend}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app: rca-frontend}
+      ports: [{port: 8000}]

@@ -1,0 +1,19 @@
+# Local try-out (no cluster needed). Uses DEMO_MODE unless GEMINI_API_KEY is exported.
+#   GEMINI_API_KEY=xxx docker compose up --build   -> http://localhost:8080
+# Live cluster data locally: mounts your kubeconfig read-only.
+services:
+  backend:
+    build: ./backend
+    environment:
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      DEMO_MODE: ${DEMO_MODE:-false}
+      KUBECONFIG: /kube/config
+    volumes:
+      - ${HOME}/.kube/config:/kube/config:ro
+  frontend:
+    build: ./frontend
+    environment:
+      BACKEND_URL: http://backend:8000
+    ports: ["8080:8080"]
+    depends_on: [backend]

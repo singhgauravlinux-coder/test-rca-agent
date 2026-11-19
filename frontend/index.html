@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WhyBot · AI Root Cause Analysis for Kubernetes</title>
+<meta name="description" content="Point it at a crashing pod. Get a 5-Why RCA in seconds.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🔍%3C/text%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="aurora" aria-hidden="true"><i></i><i></i><i></i></div>
+<div class="grid-bg" aria-hidden="true"></div>
+
+<header class="top">
+  <div class="brand"><span class="logo">?</span><b>Why</b>Bot<small>AI RCA agent</small></div>
+  <div class="chips">
+    <span class="chip" id="chip-model">model: …</span>
+    <span class="chip" id="chip-status"><i class="dot"></i><span>connecting</span></span>
+  </div>
+</header>
+
+<main>
+  <section class="hero">
+    <h1>Why did it <span class="glitch" data-text="crash">crash</span>?<br><em>Ask five times.</em></h1>
+    <p>Point WhyBot at a failing pod. It reads container logs, events &amp; pod status, then a senior-SRE
+      AI walks the <b>5-Why</b> chain down to the root cause.</p>
+  </section>
+
+  <section class="panel" id="input">
+    <div class="tabs" role="tablist">
+      <button class="tab active" data-tab="live" role="tab">⚡ Live cluster</button>
+      <button class="tab" data-tab="paste" role="tab">📋 Paste logs</button>
+    </div>
+
+    <div class="tab-body" id="tab-live">
+      <div class="row">
+        <label>Namespace
+          <select id="ns"><option>loading…</option></select>
+        </label>
+        <label>Log lines
+          <select id="tail"><option>200</option><option selected>500</option><option>1000</option><option>3000</option></select>
+        </label>
+        <label>Window
+          <select id="since"><option value="">all</option><option value="15">15 min</option><option value="60">1 hour</option><option value="360">6 hours</option></select>
+        </label>
+      </div>
+      <div class="pods-head"><span>Pods <small id="pod-count"></small></span>
+        <label class="toggle"><input type="checkbox" id="only-bad" checked> only unhealthy</label></div>
+      <div id="pods" class="pods"></div>
+    </div>
+
+    <div class="tab-body hidden" id="tab-paste">
+      <div class="row"><label class="grow">Service / pod name<input id="svc" placeholder="payments-api" value="my-service"></label></div>
+      <label>Logs<textarea id="raw-logs" rows="9" placeholder="Paste container logs here…"></textarea></label>
+      <label>Events <small>(optional · kubectl get events)</small><textarea id="raw-events" rows="3" placeholder="Warning BackOff …"></textarea></label>
+      <button class="go" id="go-raw">Run 5-Why analysis →</button>
+    </div>
+  </section>
+
+  <section id="loading" class="loading hidden">
+    <div class="orb"></div>
+    <ul id="steps">
+      <li>Collecting pod status &amp; events</li>
+      <li>Reading container logs (incl. crashed instance)</li>
+      <li>Redacting secrets</li>
+      <li>Asking Gemini to dig 5 levels deep</li>
+    </ul>
+  </section>
+
+  <div id="error" class="error hidden"></div>
+
+  <section id="result" class="hidden"></section>
+</main>
+
+<footer>Read-only · secrets redacted before leaving the cluster · AI can be wrong — verify before acting.</footer>
+<script src="app.js"></script>
+</body>
+</html>

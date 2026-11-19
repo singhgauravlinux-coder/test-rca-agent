@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rca-frontend
+  namespace: rca-agent
+  labels: {app: rca-frontend}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: rca-frontend}
+  template:
+    metadata:
+      labels: {app: rca-frontend}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: frontend
+          image: ghcr.io/OWNER/rca-agent-frontend:latest   # replaced by kustomize images:
+          ports: [{name: http, containerPort: 8080}]
+          env:
+            - name: BACKEND_URL
+              value: http://rca-backend:8000
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 5
+          resources:
+            requests: {cpu: 20m, memory: 32Mi}
+            limits: {cpu: 200m, memory: 128Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rca-frontend
+  namespace: rca-agent
+spec:
+  selector: {app: rca-frontend}
+  ports: [{name: http, port: 80, targetPort: http}]
+---
+# Remove / edit if you expose it differently. The agent can read every pod log in the
+# cluster, so put it behind SSO / VPN (e.g. oauth2-proxy annotations) - never on the open internet.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: rca-agent
+  namespace: rca-agent
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: rca.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service: {name: rca-frontend, port: {number: 80}}

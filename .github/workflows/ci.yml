@@ -1,0 +1,213 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  # ---------------------------------------------------------------- tests
+  test:
+    name: Lint & test backend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check .
+      - run: pytest -q
+
+  frontend-check:
+    name: Frontend syntax check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: node --check frontend/app.js
+
+  manifests:
+    name: Validate Kubernetes manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install kubeconform
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz | tar xz
+          sudo mv kubeconform /usr/local/bin/
+      - name: Render & validate
+        run: kubectl kustomize k8s | kubeconform -strict -summary -ignore-missing-schemas
+
+  # ---------------------------------------------------------- build & push
+  build:
+    name: Build ${{ matrix.component }} image
+    needs: [test, frontend-check, manifests]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [backend, frontend]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/rca-agent-${{ matrix.component }}
+          tags: |
+            type=sha,format=long
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build (and push on main/tags)
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.component }}
+          push: ${{ github.event_name != 'pull_request' }}
+          load: ${{ github.event_name == 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
+          provenance: true
+          sbom: true
+
+      - name: Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ github.repository_owner }}/rca-agent-${{ matrix.component }}:${{ github.event_name == 'pull_request' && 'latest' || format('sha-{0}', github.sha) }}
+          format: sarif
+          output: trivy-${{ matrix.component }}.sarif
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "0"   # report only; flip to "1" to block on findings
+        continue-on-error: true
+
+      - name: Upload scan results
+        if: always() && hashFiles(format('trivy-{0}.sarif', matrix.component)) != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-${{ matrix.component }}.sarif
+          category: trivy-${{ matrix.component }}
+
+  # ---------------------------------------------------------------- deploy
+  # Writes the freshly built image tag + registry owner into k8s/ and commits it back,
+  # so Git always shows what is deployed (and ArgoCD / Flux can sync straight from it).
+  update-manifests:
+    name: Update image tags in manifests
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Bump tags
+        run: |
+          set -euo pipefail
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+          TAG="sha-${GITHUB_SHA}"
+          cd k8s
+          # registry owner (idempotent: matches OWNER placeholder or a previous value)
+          sed -i "s#ghcr.io/[^/]*/rca-agent-#ghcr.io/${OWNER}/rca-agent-#g" kustomization.yaml backend.yaml frontend.yaml
+          # newTag sits on the line after each image name
+          for c in backend frontend; do
+            sed -i "/name: ghcr.io\/.*\/rca-agent-${c}\$/{n;s#newTag: .*#newTag: ${TAG}#}" kustomization.yaml
+          done
+          grep -A1 "name: ghcr.io" kustomization.yaml
+      - name: Commit & push
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet; then echo "No manifest change"; exit 0; fi
+          git add k8s
+          git commit -m "ci: deploy images sha-${GITHUB_SHA::7} [skip ci]"
+          git pull --rebase origin main
+          git push origin main
+
+  deploy:
+    name: Deploy to Kubernetes
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: update-manifests
+    runs-on: ubuntu-latest
+    environment: production        # add required reviewers in repo settings for a manual gate
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main                # includes the manifest commit made above
+
+      - name: Check cluster credentials
+        id: gate
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          if [ -z "$KUBE_CONFIG" ]; then
+            echo "::notice::KUBE_CONFIG secret not set - skipping deploy (images are already pushed)."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set kube context
+        if: steps.gate.outputs.enabled == 'true'
+        uses: azure/k8s-set-context@v4
+        with:
+          method: kubeconfig
+          kubeconfig: ${{ secrets.KUBE_CONFIG }}
+
+      - name: Apply manifests with this commit's images
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          set -euo pipefail
+          cd k8s   # tags/owner were already committed by update-manifests
+          # namespace + secret first so pods never start without the key
+          kubectl apply -f namespace.yaml
+          kubectl -n rca-agent create secret generic rca-gemini \
+            --from-literal=GEMINI_API_KEY="${GEMINI_API_KEY}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl apply -k .
+
+      - name: Wait for rollout
+        if: steps.gate.outputs.enabled == 'true'
+        run: |
+          kubectl -n rca-agent rollout status deploy/rca-backend  --timeout=180s
+          kubectl -n rca-agent rollout status deploy/rca-frontend --timeout=180s
