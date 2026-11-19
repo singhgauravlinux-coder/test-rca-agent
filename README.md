@@ -15,7 +15,7 @@ with evidence, fix-now commands, prevention steps and a confidence score.
 | `backend/` | FastAPI: `collector.py` (K8s read + redaction), `analyzer.py` (Gemini, JSON-schema output), `main.py` (API) |
 | `frontend/` | Static SPA (no build step) served by nginx-unprivileged, proxies `/api` to backend |
 | `k8s/` | Kustomize: namespace, **read-only** RBAC, deployments, services, ingress, NetworkPolicy |
-| `.github/workflows/ci.yml` | lint+test → manifest validation → build/push to GHCR → Trivy scan → deploy |
+| `.github/workflows/ci.yml` | lint+test → manifest validation → build/push to GHCR → Trivy scan → auto-bump image tags in `k8s/` |
 
 ## API
 - `GET /api/namespaces`, `GET /api/pods?namespace=`
@@ -32,25 +32,40 @@ GEMINI_API_KEY=... docker compose up --build      # http://localhost:8080
 Get a key at https://aistudio.google.com/apikey. Model is set by `GEMINI_MODEL` (default `gemini-2.5-flash`;
 set it to any newer Flash id without code changes).
 
-## CI/CD (GitHub Actions)
-Repo secrets / settings:
-| Name | Purpose |
-|---|---|
-| `GEMINI_API_KEY` (secret) | written into the `rca-gemini` K8s Secret on deploy |
-| `KUBE_CONFIG` (secret) | kubeconfig of a deploy ServiceAccount; **if unset, the deploy job skips** and only images are pushed |
-| `production` (environment) | optional: add required reviewers for a manual approval gate |
+## CI (GitHub Actions) — build only, you deploy
+Pipeline on every push to `main`: lint + pytest → validate manifests → build & push both images to GHCR
+(tags `sha-<commit>`, `latest`) → Trivy scan (report only) → **commit the new image tag + your GitHub owner
+into `k8s/kustomization.yaml`** (message ends with `[skip ci]`).
+There is no CD job: nothing touches your cluster. No secrets are needed in GitHub (only the built-in `GITHUB_TOKEN`).
 
-Before first run, replace `OWNER` in `k8s/*.yaml` is handled by CI on deploy; for manual deploys do
-`sed -i 's#ghcr.io/OWNER/#ghcr.io/<you>/#' k8s/*.yaml`, and set your host in `k8s/frontend.yaml` Ingress.
-Make the GHCR packages public, or add an `imagePullSecret`.
+If `main` is branch-protected, allow `github-actions[bot]` to push, otherwise the tag-commit step fails.
+Make the GHCR packages public (repo → Packages → settings) or create an `imagePullSecret`.
 
-## Manual deploy
+## Deploy yourself with Kustomize
 ```bash
+git pull                                   # picks up the tag commit made by CI
+                                           # (first time only: edit host in k8s/frontend.yaml Ingress,
+                                           #  and if CI has not run yet: sed -i 's#ghcr.io/OWNER/#ghcr.io/<you>/#' k8s/*.yaml)
+
+# 1. namespace + Gemini key (never committed to git)
 kubectl apply -f k8s/namespace.yaml
-kubectl -n rca-agent create secret generic rca-gemini --from-literal=GEMINI_API_KEY=...
+kubectl -n rca-agent create secret generic rca-gemini \
+  --from-literal=GEMINI_API_KEY='<your-key>'
+
+# 2. everything else (RBAC, backend, frontend, NetworkPolicy)
 kubectl apply -k k8s
-kubectl -n rca-agent port-forward svc/rca-frontend 8080:80
+
+# 3. verify
+kubectl -n rca-agent rollout status deploy/rca-backend deploy/rca-frontend
+kubectl -n rca-agent get pods
+
+# 4. open the UI
+kubectl -n rca-agent port-forward svc/rca-frontend 8080:80      # http://localhost:8080
 ```
+Upgrades: after CI pushes a new tag commit, `git pull && kubectl apply -k k8s`.
+Rollback: `kubectl -n rca-agent rollout undo deploy/rca-backend` (or `git revert` the tag commit and re-apply).
+Rotate the key: re-run the `create secret ... --dry-run=client -o yaml | kubectl apply -f -` form, then
+`kubectl -n rca-agent rollout restart deploy/rca-backend`.
 
 ## Security notes
 - ClusterRole is `get/list` on pods, pods/log, events, namespaces only. Restrict further with `ALLOWED_NAMESPACES`.
